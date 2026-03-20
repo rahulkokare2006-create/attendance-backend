@@ -4,13 +4,14 @@ const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
 
 const app = express();
-app.use(cors({
-  origin: ['https://attendance-aura.web.app', 'https://attendance-aura.firebaseapp.com', 'http://localhost:5173', 'http://localhost:3000'],
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'x-api-secret'],
-  credentials: true
-}));
-app.options('*', cors()); // Handle preflight
+// Allow all origins
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-api-secret');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 app.use(express.json({ limit: '50mb' }));
 
 // Firebase Admin init
@@ -119,24 +120,14 @@ app.post('/send-reports', verifySecret, async (req, res) => {
 
     console.log(`📧 Sending ${emails.length} reports via ${GMAIL_USER}`);
 
+    // Use Nodemailer with Gmail App Password via port 465 SSL
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 587,
-      secure: false, // TLS
+      port: 465,
+      secure: true,
       auth: { user: GMAIL_USER, pass: GMAIL_PASS },
-      tls: { rejectUnauthorized: false },
-      connectionTimeout: 30000,
-      greetingTimeout: 30000,
-      socketTimeout: 30000,
+      family: 4, // Force IPv4 - fixes ENETUNREACH on Render
     });
-
-    // Test Gmail connection
-    try {
-      await transporter.verify();
-      console.log('✅ Gmail verified on port 587');
-    } catch (verifyErr) {
-      console.error('⚠️ Gmail verify:', verifyErr.message);
-    }
 
     let sent = 0, failed = 0;
     for (const email of emails) {
