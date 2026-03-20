@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // Firebase Admin init
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -15,27 +15,45 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-const API_SECRET = process.env.API_SECRET || 'change-this-secret';
+const API_SECRET = process.env.API_SECRET || 'attendance-aura-secret-2026';
 const GMAIL_USER = process.env.GMAIL_USER;
 const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD;
 
+console.log('🚀 Backend starting...');
+console.log('Gmail configured:', GMAIL_USER ? `Yes (${GMAIL_USER})` : 'NO - MISSING!');
+console.log('API Secret configured:', API_SECRET ? 'Yes' : 'NO');
+
 const verifySecret = (req, res, next) => {
-  if (req.headers['x-api-secret'] !== API_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+  if (req.headers['x-api-secret'] !== API_SECRET) {
+    console.error('❌ Unauthorized request from:', req.ip);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   next();
 };
 
 // ✅ Health check
-app.get('/', (req, res) => res.json({ status: 'Attendance Backend Running ✅' }));
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'Attendance Backend Running ✅',
+    gmail: GMAIL_USER ? 'configured' : 'MISSING',
+    time: new Date().toISOString()
+  });
+});
 
 // ✅ DELETE SINGLE USER FROM FIREBASE AUTH
 app.delete('/delete-user/:uid', verifySecret, async (req, res) => {
   try {
-    await admin.auth().deleteUser(req.params.uid);
-    console.log(`✅ Deleted user ${req.params.uid}`);
+    const uid = req.params.uid;
+    console.log(`🗑️ Deleting user: ${uid}`);
+    await admin.auth().deleteUser(uid);
+    console.log(`✅ Deleted user ${uid} from Firebase Auth`);
     res.json({ success: true });
   } catch (error) {
-    if (error.code === 'auth/user-not-found') return res.json({ success: true });
-    console.error('Delete error:', error.message);
+    if (error.code === 'auth/user-not-found') {
+      console.log(`User ${req.params.uid} already deleted`);
+      return res.json({ success: true });
+    }
+    console.error('❌ Delete error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -45,46 +63,35 @@ app.post('/delete-users', verifySecret, async (req, res) => {
   try {
     const { uids } = req.body;
     if (!uids || !Array.isArray(uids)) return res.status(400).json({ error: 'uids array required' });
+    console.log(`🗑️ Batch deleting ${uids.length} users`);
     const result = await admin.auth().deleteUsers(uids);
+    console.log(`✅ Deleted ${result.successCount} users, failed: ${result.failureCount}`);
     res.json({ success: true, deleted: result.successCount, failed: result.failureCount });
   } catch (error) {
+    console.error('❌ Batch delete error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ✅ CREATE PARENT ACCOUNT (used by Manager)
+// ✅ CREATE PARENT ACCOUNT
 app.post('/create-parent', verifySecret, async (req, res) => {
   try {
     const { name, email, phone, password, childName, childUSN } = req.body;
     if (!email || !password || !childUSN) return res.status(400).json({ error: 'email, password, childUSN required' });
-
-    // Check max 2 parents per USN
-    const existingParents = await db.collection('users')
-      .where('role', '==', 'parent')
-      .where('childUSN', '==', childUSN)
-      .get();
-    if (existingParents.size >= 2) {
-      return res.status(400).json({ error: 'Maximum 2 parent accounts already exist for this student USN.' });
-    }
-
-    // Create Firebase Auth user
+    const existingParents = await db.collection('users').where('role', '==', 'parent').where('childUSN', '==', childUSN).get();
+    if (existingParents.size >= 2) return res.status(400).json({ error: 'Maximum 2 parent accounts already exist.' });
     const userRecord = await admin.auth().createUser({ email, password, displayName: name });
-
-    // Save to Firestore
     await db.collection('users').doc(userRecord.uid).set({
       id: userRecord.uid, name, email, phone: phone || '',
       role: 'parent', isActive: true,
       childName: childName || '', childUSN,
       createdAt: new Date().toISOString(),
     });
-
-    console.log(`✅ Parent account created: ${email}`);
+    console.log(`✅ Parent created: ${email}`);
     res.json({ success: true, uid: userRecord.uid });
   } catch (error) {
-    console.error('Create parent error:', error.message);
-    if (error.code === 'auth/email-already-exists') {
-      return res.status(400).json({ error: 'Email already registered' });
-    }
+    console.error('❌ Create parent error:', error.message);
+    if (error.code === 'auth/email-already-exists') return res.status(400).json({ error: 'Email already registered' });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -93,10 +100,15 @@ app.post('/create-parent', verifySecret, async (req, res) => {
 app.post('/send-reports', verifySecret, async (req, res) => {
   try {
     const { emails } = req.body;
-    if (!emails || !Array.isArray(emails)) return res.status(400).json({ error: 'emails array required' });
+    console.log(`📧 Send reports request received. Count: ${emails?.length}`);
+    
+    if (!emails || !Array.isArray(emails) || emails.length === 0) {
+      return res.status(400).json({ error: 'emails array required and must not be empty' });
+    }
+    
     if (!GMAIL_USER || !GMAIL_PASS) {
-      console.error('Gmail not configured! GMAIL_USER:', GMAIL_USER ? 'set' : 'missing');
-      return res.status(500).json({ error: 'Gmail credentials not configured on server' });
+      console.error('❌ Gmail NOT configured!');
+      return res.status(500).json({ error: 'Gmail credentials not configured on server. Check GMAIL_USER and GMAIL_APP_PASSWORD env vars.' });
     }
 
     console.log(`📧 Sending ${emails.length} reports via ${GMAIL_USER}`);
@@ -106,9 +118,14 @@ app.post('/send-reports', verifySecret, async (req, res) => {
       auth: { user: GMAIL_USER, pass: GMAIL_PASS },
     });
 
-    // Test connection first
-    await transporter.verify();
-    console.log('✅ Gmail connection verified');
+    // Verify Gmail connection
+    try {
+      await transporter.verify();
+      console.log('✅ Gmail connection verified');
+    } catch (verifyErr) {
+      console.error('❌ Gmail verification failed:', verifyErr.message);
+      return res.status(500).json({ error: `Gmail auth failed: ${verifyErr.message}` });
+    }
 
     let sent = 0, failed = 0;
     for (const email of emails) {
@@ -129,14 +146,14 @@ app.post('/send-reports', verifySecret, async (req, res) => {
             <h1 style="color:white;margin:0;font-size:22px;">Attendance Report ${statusEmoji}</h1>
             <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;">${periodLabel}</p>
           </div>
-          <p style="color:#374151;">Dear <strong>${email.parentName}</strong>,</p>
-          <p style="color:#374151;">Here is the attendance report for <strong>${email.studentName}</strong> (${email.usn}):</p>
+          <p style="color:#374151;">Dear <strong>${email.parentName || 'Parent'}</strong>,</p>
+          <p style="color:#374151;">Attendance report for <strong>${email.studentName}</strong> (${email.usn}):</p>
           <div style="background:white;border-radius:12px;padding:20px;margin:16px 0;text-align:center;">
             <div style="font-size:48px;font-weight:bold;color:${email.percentage>=75?'#16a34a':'#dc2626'};">${email.percentage}%</div>
             <p style="color:#6b7280;margin:4px 0;">Overall Attendance</p>
             <div style="display:flex;justify-content:center;gap:24px;margin-top:12px;">
-              <span style="color:#16a34a;">✓ Present: ${email.present}</span>
-              <span style="color:#dc2626;">✗ Absent: ${email.absent}</span>
+              <span style="color:#16a34a;">Present: ${email.present}</span>
+              <span style="color:#dc2626;">Absent: ${email.absent}</span>
               <span style="color:#6b7280;">Total: ${email.total}</span>
             </div>
           </div>
@@ -152,14 +169,14 @@ app.post('/send-reports', verifySecret, async (req, res) => {
               <tbody>${subjectWiseRows}</tbody>
             </table>
           </div>` : ''}
-          ${email.percentage < 75 ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;color:#dc2626;margin:16px 0;">⚠️ Attendance below 75%. Ensure regular attendance to avoid exam debarment.</div>' : ''}
-          <p style="color:#9ca3af;font-size:12px;text-align:center;margin-top:24px;">Automated report from Attendance Management System</p>
+          ${email.percentage < 75 ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;color:#dc2626;margin:16px 0;">⚠️ Attendance below 75%. Please ensure regular attendance.</div>' : ''}
+          <p style="color:#9ca3af;font-size:12px;text-align:center;margin-top:24px;">Automated report from Attendance Aura System</p>
         </div>`;
 
         await transporter.sendMail({
-          from: `"Attendance System" <${GMAIL_USER}>`,
+          from: `"Attendance Aura" <${GMAIL_USER}>`,
           to: email.to,
-          subject: `${periodLabel} Report - ${email.studentName} (${email.usn})`,
+          subject: `${periodLabel} Attendance - ${email.studentName} (${email.usn})`,
           html,
         });
         sent++;
@@ -170,13 +187,13 @@ app.post('/send-reports', verifySecret, async (req, res) => {
       }
     }
 
+    console.log(`📊 Done: ${sent} sent, ${failed} failed`);
     res.json({ success: true, sent, failed });
   } catch (error) {
-    console.error('Send reports error:', error.message);
+    console.error('❌ Send reports error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
- 
+app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
