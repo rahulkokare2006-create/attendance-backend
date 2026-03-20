@@ -4,7 +4,13 @@ const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['https://attendance-aura.web.app', 'https://attendance-aura.firebaseapp.com', 'http://localhost:5173', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-api-secret'],
+  credentials: true
+}));
+app.options('*', cors()); // Handle preflight
 app.use(express.json({ limit: '50mb' }));
 
 // Firebase Admin init
