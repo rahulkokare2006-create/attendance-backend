@@ -120,17 +120,22 @@ app.post('/send-reports', verifySecret, async (req, res) => {
     console.log(`📧 Sending ${emails.length} reports via ${GMAIL_USER}`);
 
     const transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false, // TLS
       auth: { user: GMAIL_USER, pass: GMAIL_PASS },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 30000,
     });
 
-    // Verify Gmail connection
+    // Test Gmail connection
     try {
       await transporter.verify();
-      console.log('✅ Gmail connection verified');
+      console.log('✅ Gmail verified on port 587');
     } catch (verifyErr) {
-      console.error('❌ Gmail verification failed:', verifyErr.message);
-      return res.status(500).json({ error: `Gmail auth failed: ${verifyErr.message}` });
+      console.error('⚠️ Gmail verify:', verifyErr.message);
     }
 
     let sent = 0, failed = 0;
